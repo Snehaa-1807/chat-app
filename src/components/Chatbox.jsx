@@ -49,23 +49,32 @@ const ChatBox = ({ selectedUser }) => {
   }, [messages]);
 
   // ✅ Send message
-  const handleSendMessage = (e) => {
-    e.preventDefault();
-    if (messageText.trim()) {
-      const newMessage = {
-        sender: senderEmail,
-        text: messageText,
-        timestamp: {
-          seconds: Math.floor(Date.now() / 1000),
-          nanoseconds: 0,
-        },
-      };
+const handleSendMessage = async (e) => {
+  e.preventDefault();
+  const trimmed = messageText.trim();
+  if (!trimmed) return;
 
-      sendMessage(messageText, chatId, user1?.uid, user2?.uid); // Firestore update
-      setMessages((prev) => [...prev, newMessage]); // Local UI update
-      setMessageText("");
-    }
+  const tempMessage = {
+    text: trimmed,
+    sender: senderEmail,
+    timestamp: {
+      seconds: Math.floor(Date.now() / 1000),
+      nanoseconds: 0,
+    },
+    // optional: temporary ID to help React diff
+    temp: true,
   };
+
+  // ⏱️ Add message instantly to UI
+  setMessages((prev) => [...prev, tempMessage]);
+
+  // 🔄 Send message to Firestore
+  await sendMessage(trimmed, chatId, user1?.uid, user2?.uid);
+
+  // ✅ Clear input after send
+  setMessageText("");
+};
+
 
   return (
     <>
