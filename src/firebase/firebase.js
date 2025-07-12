@@ -10,6 +10,9 @@ import {
   getDoc,
   setDoc,
   addDoc,
+  query,
+  where,
+  getDocs,
 } from "firebase/firestore";
 
 // Firebase Configuration
@@ -27,29 +30,66 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
-// ✅ LISTEN for real-time chat list
+///////////////////////////////////////////////////////////
+// ✅ Helper: Check if two users are friends
+export const areFriends = async (uid1, uid2) => {
+  const q1 = query(
+    collection(db, "friendRequests"),
+    where("from", "==", uid1),
+    where("to", "==", uid2),
+    where("status", "==", "accepted")
+  );
+  const q2 = query(
+    collection(db, "friendRequests"),
+    where("from", "==", uid2),
+    where("to", "==", uid1),
+    where("status", "==", "accepted")
+  );
+
+  const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
+  return !snap1.empty || !snap2.empty;
+};
+
+///////////////////////////////////////////////////////////
+// ✅ Real-time listener for chats (filtering by friends)
 export const listenForChats = (setChats) => {
   const chatsRef = collection(db, "chats");
-  const unsubscribe = onSnapshot(chatsRef, (snapshot) => {
-    const chatList = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
 
-    const filteredChats = chatList.filter((chat) =>
-      chat.users?.some((user) => user?.email === auth.currentUser?.email)
-    );
+  const unsubscribe = onSnapshot(chatsRef, async (snapshot) => {
+    const currentUid = auth.currentUser?.uid;
+    const currentEmail = auth.currentUser?.email;
+    const chatList = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    const filteredChats = [];
+
+    for (const chat of chatList) {
+      const otherUser = chat.users.find((user) => user.email !== currentEmail);
+      if (!otherUser) continue;
+
+      const isFriend = await areFriends(currentUid, otherUser.uid);
+      if (isFriend) {
+        filteredChats.push(chat);
+      }
+    }
 
     setChats(filteredChats);
   });
+
   return unsubscribe;
 };
 
-// ✅ SEND MESSAGE with minimal user data
-export const sendMessage = async (messageText, chatId, user1, user2) => {
+///////////////////////////////////////////////////////////
+// ✅ Send a message (text, image, or document)
+export const sendMessage = async (messageText, chatId, uid1, uid2, fileData = null) => {
+  const isFriend = await areFriends(uid1, uid2);
+  if (!isFriend) {
+    alert("You can only chat with friends after they accept your request.");
+    return;
+  }
+
   const chatRef = doc(db, "chats", chatId);
-  const user1Snap = await getDoc(doc(db, "users", user1));
-  const user2Snap = await getDoc(doc(db, "users", user2));
+  const user1Snap = await getDoc(doc(db, "users", uid1));
+  const user2Snap = await getDoc(doc(db, "users", uid2));
 
   if (!user1Snap.exists() || !user2Snap.exists()) {
     console.error("One or both user documents not found.");
@@ -75,25 +115,45 @@ export const sendMessage = async (messageText, chatId, user1, user2) => {
     image: u2.image || "",
   };
 
-  const chatDoc = await getDoc(chatRef);
+  // ✅ Format the lastMessage string for preview
+  const lastMessage = fileData
+    ? fileData.fileType === "image"
+      ? "📷 Photo"
+      : "📄 Document"
+    : messageText;
 
+  // ✅ Create or update chat document
+  const chatDoc = await getDoc(chatRef);
   if (!chatDoc.exists()) {
     await setDoc(chatRef, {
       users: [user1Data, user2Data],
-      lastMessage: messageText,
+      userIds: [uid1, uid2],
+      lastMessage,
       lastMessageTimestamp: serverTimestamp(),
     });
   } else {
     await updateDoc(chatRef, {
-      lastMessage: messageText,
+      lastMessage,
       lastMessageTimestamp: serverTimestamp(),
     });
   }
 
-  const messageRef = collection(db, "chats", chatId, "messages");
-  await addDoc(messageRef, {
-    text: messageText,
+  // ✅ Prepare message object
+  const message = {
     sender: auth.currentUser.email,
+    senderId: auth.currentUser.uid,
     timestamp: serverTimestamp(),
-  });
+    readBy: [auth.currentUser.uid],
+  };
+
+  if (fileData) {
+    message.fileUrl = fileData.fileUrl;
+    message.fileType = fileData.fileType;
+  } else {
+    message.text = messageText;
+  }
+
+  // ✅ Add message to subcollection
+  const messageRef = collection(db, "chats", chatId, "messages");
+  await addDoc(messageRef, message);
 };
